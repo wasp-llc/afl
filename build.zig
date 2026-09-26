@@ -1,39 +1,49 @@
+const builtin = @import("builtin");
 const std = @import("std");
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
-    const mod = b.addModule("afl", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
+pub fn addInstrumentedExe(
+    b: *std.Build,
+    obj: *std.Build.Step.Compile,
+) std.Build.LazyPath {
+    const pkg = b.dependencyFromBuildZig(
+        @This(),
+        .{},
+    );
+    const afl_cc = b.addSystemCommand(&.{
+        b.findProgram(&.{"afl-cc"}, &.{}) catch
+            @panic("Error: could not find 'afl-cc', which is required to build"),
+        "-O3",
     });
-    const exe = b.addExecutable(.{
-        .name = "afl",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "afl", .module = mod },
-            },
-        }),
-    });
-    b.installArtifact(exe);
-    const run_step = b.step("run", "Run the app");
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
+    if (builtin.target.os.tag.isDarwin()) {
+        afl_cc.addArg("-fuse-ld=lld");
     }
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
+    afl_cc.addArg("-o");
+    const fuzz_exe = afl_cc.addOutputFileArg(obj.name);
+    afl_cc.addFileArg(pkg.path("afl.c"));
+    afl_cc.addFileArg(obj.getEmittedLlvmBc());
+    obj.bundle_ubsan_rt = true;
+    obj.bundle_compiler_rt = true;
+    obj.root_module.pic = true;
+    afl_cc.addFileArg(obj.getEmittedBin());
+    return fuzz_exe;
+}
+pub fn addFuzzerRun(
+    b: *std.Build,
+    exe: std.Build.LazyPath,
+    corpus_dir: std.Build.LazyPath,
+    output_dir: std.Build.LazyPath,
+) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{
+        b.findProgram(&.{"afl-fuzz"}, &.{}) catch
+            @panic("Error: could not find 'afl-fuzz', which is required to run"),
+        "-i",
     });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    run.addDirectoryArg(corpus_dir);
+    run.addArgs(&.{"-o"});
+    run.addDirectoryArg(output_dir);
+    run.addArgs(&.{"--"});
+    run.addFileArg(exe);
+    return run;
+}
+pub fn build(b: *std.Build) !void {
+    _ = b;
 }
